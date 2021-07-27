@@ -118,6 +118,8 @@ def train_model(model, optimizer, scheduler, num_epochs=25):
     anchor_batch = anchor_batch.to(device)
     model.init_center_c(anchor_batch, anchor_lens)
     print(model.center)
+    center = copy.deepcopy(model.center).cpu().numpy()
+    np.save("svdd_sin_center_.npy", center)
 
     for epoch in range(num_epochs):
         print("Epoch {}/{}".format(epoch, num_epochs - 1))
@@ -147,6 +149,10 @@ def train_model(model, optimizer, scheduler, num_epochs=25):
             best_model_wts = copy.deepcopy(model.state_dict())
             weight_name = "svdd_sin_weights_" + str(epoch) + ".pt"
             torch.save(best_model_wts, weight_name)
+            radius = copy.deepcopy(model.R.data)
+            radius = radius.cpu().numpy()
+            np.save("svdd_sin_radius_"+ str(epoch) + ".npy", radius)
+
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

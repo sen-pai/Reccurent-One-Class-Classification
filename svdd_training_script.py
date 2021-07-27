@@ -21,10 +21,12 @@ from torch.utils.data import DataLoader
 
 from dataloader import CleanSineDataset
 from autoencoder_models import RNNEncoder, RNNDecoder, Seq2SeqAttn
+from svdd_models import ReccurentSVDD
 from data_utils import pad_collate
 
 # comment out warnings if you are testing it out
 import warnings
+
 warnings.filterwarnings("ignore")
 
 parser = argparse.ArgumentParser(description="RNNAutoEncoder")
@@ -41,7 +43,6 @@ parser.add_argument(
     default=20,
     help="train batch size",
 )
-
 parser.add_argument(
     "--lr",
     type=float,
@@ -82,17 +83,24 @@ clean_dataloader = DataLoader(
 )
 
 
-def calc_loss(
-    prediction,
-    target,
-    metrics,
-):
-    mse_loss = F.mse_loss(prediction, target)
-    mae_loss = F.l1_loss(prediction, target)
-    metrics["MSE"] += mse_loss.data.cpu().numpy() * target.size(0)
-    metrics["MAE"] += mae_loss.data.cpu().numpy() * target.size(0)
+def calc_loss(batch_embeddings, model, metrics):
+    # single epoch using the soft-boundary version from the paper
 
-    return mse_loss
+    dist = (batch_embeddings - model.center) ** 2
+    dist = torch.sum(dist)
+
+    scores = dist - model.R ** 2
+    loss = model.R ** 2 + (1 / model.nu) * torch.mean(
+        torch.max(torch.zeros_like(scores), scores)
+    )
+
+    model.R.data = torch.tensor(model.get_radius(dist), device=model.device())
+
+    copy_rad = copy.deepcopy(model.R.data)
+    metrics["SVDD_loss"] += loss.data.cpu().numpy() * batch_embeddings.size(0)
+    metrics["Radius"] += copy_rad.cpu().numpy() * batch_embeddings.size(0)
+
+    return loss
 
 
 def print_metrics(metrics, epoch_samples, epoch):
@@ -105,6 +113,12 @@ def print_metrics(metrics, epoch_samples, epoch):
 
 
 def train_model(model, optimizer, scheduler, num_epochs=25):
+
+    (_, anchor_batch, anchor_lens) = next(iter(clean_dataloader))
+    anchor_batch = anchor_batch.to(device)
+    model.init_center_c(anchor_batch, anchor_lens)
+    print(model.center)
+
     for epoch in range(num_epochs):
         print("Epoch {}/{}".format(epoch, num_epochs - 1))
         print("-" * 10)
@@ -117,11 +131,9 @@ def train_model(model, optimizer, scheduler, num_epochs=25):
             # forward
             optimizer.zero_grad()
 
-            decoded_clean, all_attn = model(
-                clean, encoder_lens=clean_lens, decoder_lens=clean_lens
-            )
+            batch_embeddings = model.encoded_embedding(clean, clean_lens)
 
-            loss = calc_loss(clean, decoded_clean, metrics)
+            loss = calc_loss(batch_embeddings, model, metrics)
 
             loss.backward()
             optimizer.step()
@@ -133,24 +145,24 @@ def train_model(model, optimizer, scheduler, num_epochs=25):
         if epoch % args.save_freq == 0:
             print("saving model")
             best_model_wts = copy.deepcopy(model.state_dict())
-            weight_name = "sin_ae_weights_" + str(epoch) + ".pt"
+            weight_name = "svdd_sin_weights_" + str(epoch) + ".pt"
             torch.save(best_model_wts, weight_name)
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-e = RNNEncoder(input_dim=1, bidirectional=True)
+e = RNNEncoder(input_dim=1, bidirectional=True).to(device)
 d = RNNDecoder(
     input_dim=(e.input_size + e.hidden_size * 2),
     hidden_size=e.hidden_size,
     bidirectional=True,
-)
+).to(device)
 
-model = Seq2SeqAttn(encoder=e, decoder=d).to(device)
+ae_model = Seq2SeqAttn(encoder=e, decoder=d).to(device)
+ae_model.load_state_dict(torch.load("sin_ae_weights_30.pt"))
 
+model = ReccurentSVDD(base_encoder=ae_model.encoder)
 optimizer = optim.Adam(model.parameters(), lr=args.lr)
 scheduler = None
-# if args.schedule:
-#     scheduler = StepLR(optimizer, step_size=5000, gamma=0.1)
 train_model(model, optimizer, scheduler, num_epochs=150)

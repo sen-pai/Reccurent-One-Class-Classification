@@ -5,46 +5,29 @@ from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 import math
 import numpy as np
 
+import autoencoder_models
 
-class RNNEncoder(nn.Module):
+class ReccurentSVDD(nn.Module):
     def __init__(
         self,
-        input_dim,
-        n_layers=1,
-        hidden_size=100,
-        encoder_dropout=0.0,
-        bidirectional=False,
+        base_encoder: autoencoder_models.RNNEncoder
     ):
-        super(RNNEncoder, self).__init__()
+        super(ReccurentSVDD, self).__init__()
 
-        self.input_size = input_dim
-        self.hidden_size = hidden_size
-        self.layers = n_layers
-        self.dropout = encoder_dropout
-        self.bi = bidirectional
+        self.base_encoder = base_encoder
+        self.hidden_size = self.base_encoder.hidden_size
+        self.bi = self.base_encoder.bi
 
-        self.encoder_rnn = nn.LSTM(
-            self.input_size,
-            self.hidden_size,
-            self.layers,
-            dropout=self.dropout,
-            bidirectional=self.bi,
-            batch_first=True,
-        )
 
-    def encode(self, inputs, input_lengths):
+    def encoded_embedding(self, inputs, input_lengths):
         packed_input = pack_padded_sequence(
             inputs, input_lengths, enforce_sorted=False, batch_first=True
         )
 
         self.batch_size = inputs.size()[0]
-        max_len = int(torch.max(input_lengths).item())
 
-        encoder_outputs, (h_n, c_n) = self.encoder_rnn(packed_input)
-        encoder_outputs, _ = pad_packed_sequence(
-            encoder_outputs, batch_first=True, total_length=max_len
-        )
-        # encoder_outputs -> [batch size, max seq lenght, hidden size]
+        _, (h_n, c_n) = self.encoder_rnn(packed_input)
+        
         # h_n -> [1, batch size, hidden size]
         # c_n -> [1, batch size, hidden size]
 
@@ -52,7 +35,12 @@ class RNNEncoder(nn.Module):
             h_n = h_n.view(1, self.batch_size, self.hidden_size*2)
             c_n = c_n.view(1, self.batch_size, self.hidden_size*2)
             
-        return encoder_outputs, h_n, c_n
+        return h_n
+
+    def get_radius(self, dist: torch.Tensor, nu: float):
+        """Optimally solve for radius R via the (1-nu)-quantile of distances."""
+        return np.quantile(np.sqrt(dist.clone().data.cpu().numpy()), 1 - nu)
+
 
     def device(self) -> torch.device:
         """Heuristic to determine which device this module is on."""
